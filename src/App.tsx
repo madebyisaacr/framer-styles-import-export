@@ -71,7 +71,12 @@ function getInitialExportSettings(): ExportSettings {
 }
 
 export function App() {
-	const isAllowedToImport = useIsAllowedTo("createColorStyle", "ColorStyle.setAttributes");
+	const isAllowedToImport = useIsAllowedTo(
+		"createColorStyle",
+		"createTextStyle",
+		"ColorStyle.setAttributes",
+		"TextStyle.setAttributes"
+	);
 
 	const [view, setView] = useState<"home" | "export">("home");
 	const [exportSettings, setExportSettings] = useState<ExportSettings>(() =>
@@ -112,64 +117,314 @@ export function App() {
 			const raw = await readFileAsText(file);
 			const parsed: unknown = JSON.parse(raw);
 
-			const imported = normalizeImportedColorStyles(parsed);
-			if (imported.length === 0) {
-				framer.notify("No color styles found in JSON");
+			const importedColorStyles = normalizeImportedColorStyles(parsed);
+			const importedTextStyles = normalizeImportedTextStyles(parsed);
+
+			if (importedColorStyles.length === 0 && importedTextStyles.length === 0) {
+				framer.notify("No styles found in JSON");
 				return;
 			}
 
-			const existing = await framer.getColorStyles();
+			const colorCreatedUpdatedUnchanged = {
+				created: 0,
+				updated: 0,
+				unchanged: 0,
+			};
 
-			const byId = new Map<string, (typeof existing)[number]>();
-			const byPath = new Map<string, (typeof existing)[number]>();
+			let colorsAfterImport = await framer.getColorStyles();
 
-			for (const style of existing) {
-				byId.set(String(style.id), style);
-				byPath.set(stripLeadingSlash(style.path), style);
+			if (importedColorStyles.length > 0) {
+				const byId = new Map<string, (typeof colorsAfterImport)[number]>();
+				const byPath = new Map<string, (typeof colorsAfterImport)[number]>();
+
+				for (const style of colorsAfterImport) {
+					byId.set(String(style.id), style);
+					byPath.set(stripLeadingSlash(style.path), style);
+				}
+
+				for (const importedStyle of importedColorStyles) {
+					const match = byId.get(importedStyle.id) ?? byPath.get(importedStyle.name);
+
+					if (match) {
+						const updates: { light?: string; dark?: string | null; path?: string } = {};
+
+						if (match.light !== importedStyle.light) {
+							updates.light = importedStyle.light;
+						}
+
+						const matchDark = match.dark ?? null;
+						if (matchDark !== importedStyle.dark) {
+							updates.dark = importedStyle.dark;
+						}
+
+						const matchName = stripLeadingSlash(match.path);
+						if (matchName !== importedStyle.name) {
+							updates.path = importedStyle.name;
+						}
+
+						if (Object.keys(updates).length > 0) {
+							await match.setAttributes(updates);
+							colorCreatedUpdatedUnchanged.updated++;
+						} else {
+							colorCreatedUpdatedUnchanged.unchanged++;
+						}
+					} else {
+						await framer.createColorStyle({
+							light: importedStyle.light,
+							dark: importedStyle.dark,
+							path: importedStyle.name,
+						});
+						colorCreatedUpdatedUnchanged.created++;
+					}
+				}
+
+				// Re-fetch so text imports can resolve updated/missing color tokens.
+				colorsAfterImport = await framer.getColorStyles();
 			}
 
-			let created = 0;
-			let updated = 0;
-			let unchanged = 0;
+			const textCreatedUpdatedUnchanged = {
+				created: 0,
+				updated: 0,
+				unchanged: 0,
+			};
 
-			for (const importedStyle of imported) {
-				const match = byId.get(importedStyle.id) ?? byPath.get(importedStyle.name);
+			if (importedTextStyles.length > 0) {
+				const existingText = await framer.getTextStyles();
 
-				if (match) {
-					const updates: { light?: string; dark?: string | null; path?: string } = {};
+				const byId = new Map<string, (typeof existingText)[number]>();
+				const byPath = new Map<string, (typeof existingText)[number]>();
 
-					if (match.light !== importedStyle.light) {
-						updates.light = importedStyle.light;
+				for (const style of existingText) {
+					byId.set(String(style.id), style);
+					byPath.set(stripLeadingSlash(style.path), style);
+				}
+
+				const fonts = await framer.getFonts();
+				const byFontSelector = new Map<string, (typeof fonts)[number]>();
+				for (const font of fonts) byFontSelector.set(font.selector, font);
+
+				const byColorId = new Map<string, (typeof colorsAfterImport)[number]>();
+				const byColorPath = new Map<string, (typeof colorsAfterImport)[number]>();
+				for (const c of colorsAfterImport) {
+					byColorId.set(String(c.id), c);
+					byColorPath.set(stripLeadingSlash(c.path), c);
+				}
+
+				const resolveFont = (selector: string | null): (typeof fonts)[number] | null => {
+					if (!selector) return null;
+					return byFontSelector.get(selector) ?? null;
+				};
+
+				type ImportedColorRef = { id: string; name: string; color: string | null } | string | null;
+
+				const canonicalColorRef = (
+					ref: ImportedColorRef
+				):
+					| { kind: "null" }
+					| { kind: "color"; id: string }
+					| { kind: "literal"; value: string } => {
+					if (ref === null) return { kind: "null" };
+					if (typeof ref === "string") {
+						const maybeId = byColorId.get(ref);
+						if (maybeId) return { kind: "color", id: String(maybeId.id) };
+						const maybeByPath = byColorPath.get(stripLeadingSlash(ref));
+						if (maybeByPath) return { kind: "color", id: String(maybeByPath.id) };
+						return { kind: "literal", value: String(convertRgbToHex(ref)) };
 					}
 
-					const matchDark = match.dark ?? null;
-					if (matchDark !== importedStyle.dark) {
-						updates.dark = importedStyle.dark;
+					const byId = byColorId.get(ref.id);
+					if (byId) return { kind: "color", id: String(byId.id) };
+					const byPath = byColorPath.get(stripLeadingSlash(ref.name));
+					if (byPath) return { kind: "color", id: String(byPath.id) };
+					return {
+						kind: "literal",
+						value: ref.color ?? stripLeadingSlash(ref.name),
+					};
+				};
+
+				const canonicalProjectColor = (
+					value: (typeof existingText)[number]["color"] | unknown
+				):
+					| { kind: "null" }
+					| { kind: "color"; id: string }
+					| { kind: "literal"; value: string } => {
+					if (value === null) return { kind: "null" };
+					if (typeof value === "string") {
+						const maybeId = byColorId.get(value);
+						if (maybeId) return { kind: "color", id: String(maybeId.id) };
+						const maybeByPath = byColorPath.get(stripLeadingSlash(value));
+						if (maybeByPath) return { kind: "color", id: String(maybeByPath.id) };
+						return { kind: "literal", value: String(convertRgbToHex(value)) };
 					}
 
-					const matchName = stripLeadingSlash(match.path);
-					if (matchName !== importedStyle.name) {
-						updates.path = importedStyle.name;
+					const maybeObj = value as Record<string, unknown>;
+					const id = maybeObj.id != null ? String(maybeObj.id) : null;
+					if (id) return { kind: "color", id };
+
+					const path = typeof maybeObj.path === "string" ? stripLeadingSlash(maybeObj.path) : null;
+					const byPath = path ? byColorPath.get(path) : undefined;
+					if (byPath) return { kind: "color", id: String(byPath.id) };
+
+					const light =
+						typeof maybeObj.light === "string" ? String(convertRgbToHex(maybeObj.light)) : null;
+					return { kind: "literal", value: light ?? path ?? "" };
+				};
+
+				const normalizeCurrentTextForCompare = (style: (typeof existingText)[number]) => {
+					return {
+						name: stripLeadingSlash(style.path),
+						tag: style.tag,
+						font: style.font.selector,
+						boldFont: style.boldFont ? style.boldFont.selector : null,
+						italicFont: style.italicFont ? style.italicFont.selector : null,
+						boldItalicFont: style.boldItalicFont ? style.boldItalicFont.selector : null,
+						color: canonicalProjectColor(style.color),
+						transform: style.transform,
+						alignment: style.alignment,
+						decoration: style.decoration,
+						decorationColor: canonicalProjectColor(style.decorationColor),
+						decorationThickness: style.decorationThickness,
+						decorationStyle: style.decorationStyle,
+						decorationSkipInk: style.decorationSkipInk,
+						decorationOffset: style.decorationOffset,
+						balance: style.balance,
+						minWidth: style.minWidth,
+						fontSize: style.fontSize,
+						letterSpacing: style.letterSpacing,
+						lineHeight: style.lineHeight,
+						paragraphSpacing: style.paragraphSpacing,
+						breakpoints: style.breakpoints.map((bp) => ({
+							minWidth: bp.minWidth,
+							fontSize: bp.fontSize,
+							letterSpacing: bp.letterSpacing,
+							lineHeight: bp.lineHeight,
+							paragraphSpacing: bp.paragraphSpacing,
+						})),
+					};
+				};
+
+				const buildTextAttributes = (
+					importedStyle: ReturnType<typeof normalizeImportedTextStyles>[number]
+				) => {
+					const resolvedFont = resolveFont(importedStyle.font);
+					const resolvedBoldFont = resolveFont(importedStyle.boldFont);
+					const resolvedItalicFont = resolveFont(importedStyle.italicFont);
+					const resolvedBoldItalicFont = resolveFont(importedStyle.boldItalicFont);
+
+					if (!resolvedFont) {
+						throw new Error(`Font not found for selector: ${importedStyle.font}`);
 					}
 
-					if (Object.keys(updates).length > 0) {
-						await match.setAttributes(updates);
-						updated++;
-					} else {
-						unchanged++;
-					}
-				} else {
-					await framer.createColorStyle({
-						light: importedStyle.light,
-						dark: importedStyle.dark,
+					const resolveColorRef = (
+						ref: ImportedColorRef
+					): (typeof colorsAfterImport)[number] | string => {
+						if (ref === null) throw new Error("Color reference is null");
+						if (typeof ref === "string") {
+							const byId = byColorId.get(ref);
+							if (byId) return byId;
+							const byPath = byColorPath.get(stripLeadingSlash(ref));
+							if (byPath) return byPath;
+							return String(convertRgbToHex(ref));
+						}
+
+						const byId = byColorId.get(ref.id);
+						if (byId) return byId;
+						const byPath = byColorPath.get(stripLeadingSlash(ref.name));
+						if (byPath) return byPath;
+						return ref.color ?? stripLeadingSlash(ref.name);
+					};
+
+					return {
 						path: importedStyle.name,
-					});
-					created++;
+						tag: importedStyle.tag,
+
+						color: resolveColorRef(importedStyle.color),
+						font: resolvedFont,
+						boldFont: resolvedBoldFont,
+						italicFont: resolvedItalicFont,
+						boldItalicFont: resolvedBoldItalicFont,
+
+						transform: importedStyle.transform,
+						alignment: importedStyle.alignment,
+						decoration: importedStyle.decoration,
+
+						decorationColor: resolveColorRef(importedStyle.decorationColor),
+
+						decorationThickness: importedStyle.decorationThickness,
+						decorationStyle: importedStyle.decorationStyle,
+						decorationSkipInk: importedStyle.decorationSkipInk,
+						decorationOffset: importedStyle.decorationOffset,
+
+						balance: importedStyle.balance,
+						minWidth: importedStyle.minWidth,
+						fontSize: importedStyle.fontSize,
+						letterSpacing: importedStyle.letterSpacing,
+						lineHeight: importedStyle.lineHeight,
+						paragraphSpacing: importedStyle.paragraphSpacing,
+
+						breakpoints: importedStyle.breakpoints.map((bp) => ({
+							minWidth: bp.minWidth,
+							fontSize: bp.fontSize,
+							letterSpacing: bp.letterSpacing,
+							lineHeight: bp.lineHeight,
+							paragraphSpacing: bp.paragraphSpacing,
+						})),
+					} as Parameters<typeof framer.createTextStyle>[0];
+				};
+
+				for (const importedStyle of importedTextStyles) {
+					const match = byId.get(importedStyle.id) ?? byPath.get(importedStyle.name);
+
+					if (match) {
+						const current = normalizeCurrentTextForCompare(match);
+						const importedForCompare = {
+							name: importedStyle.name,
+							tag: importedStyle.tag,
+							font: importedStyle.font,
+							boldFont: importedStyle.boldFont,
+							italicFont: importedStyle.italicFont,
+							boldItalicFont: importedStyle.boldItalicFont,
+							color: canonicalColorRef(importedStyle.color as ImportedColorRef),
+							transform: importedStyle.transform,
+							alignment: importedStyle.alignment,
+							decoration: importedStyle.decoration,
+							decorationColor: canonicalColorRef(importedStyle.decorationColor as ImportedColorRef),
+							decorationThickness: importedStyle.decorationThickness,
+							decorationStyle: importedStyle.decorationStyle,
+							decorationSkipInk: importedStyle.decorationSkipInk,
+							decorationOffset: importedStyle.decorationOffset,
+							balance: importedStyle.balance,
+							minWidth: importedStyle.minWidth,
+							fontSize: importedStyle.fontSize,
+							letterSpacing: importedStyle.letterSpacing,
+							lineHeight: importedStyle.lineHeight,
+							paragraphSpacing: importedStyle.paragraphSpacing,
+							breakpoints: importedStyle.breakpoints.map((bp) => ({
+								minWidth: bp.minWidth,
+								fontSize: bp.fontSize,
+								letterSpacing: bp.letterSpacing,
+								lineHeight: bp.lineHeight,
+								paragraphSpacing: bp.paragraphSpacing,
+							})),
+						};
+
+						if (JSON.stringify(current) !== JSON.stringify(importedForCompare)) {
+							const attributes = buildTextAttributes(importedStyle);
+							await match.setAttributes(attributes);
+							textCreatedUpdatedUnchanged.updated++;
+						} else {
+							textCreatedUpdatedUnchanged.unchanged++;
+						}
+					} else {
+						const attributes = buildTextAttributes(importedStyle);
+						await framer.createTextStyle(attributes);
+						textCreatedUpdatedUnchanged.created++;
+					}
 				}
 			}
 
 			framer.notify(
-				`Import complete: ${created} created, ${updated} updated, ${unchanged} unchanged`
+				`Import complete: color ${colorCreatedUpdatedUnchanged.created} created, ${colorCreatedUpdatedUnchanged.updated} updated, ${colorCreatedUpdatedUnchanged.unchanged} unchanged; text ${textCreatedUpdatedUnchanged.created} created, ${textCreatedUpdatedUnchanged.updated} updated, ${textCreatedUpdatedUnchanged.unchanged} unchanged`
 			);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -510,6 +765,225 @@ function normalizeImportedColorStyles(
 	return out;
 }
 
+function normalizeImportedTextStyles(input: unknown): Array<{
+	id: string;
+	name: string;
+	tag: string;
+
+	font: string;
+	boldFont: string | null;
+	italicFont: string | null;
+	boldItalicFont: string | null;
+
+	color: { id: string; name: string; color: string | null } | string | null;
+
+	transform: string;
+	alignment: string;
+	decoration: string;
+	decorationColor: { id: string; name: string; color: string | null } | string | null;
+
+	decorationThickness: string;
+	decorationStyle: string;
+	decorationSkipInk: string;
+	decorationOffset: string;
+
+	balance: boolean;
+
+	minWidth: number;
+	fontSize: string;
+	letterSpacing: string;
+	lineHeight: string;
+	paragraphSpacing: number;
+
+	breakpoints: Array<{
+		minWidth: number;
+		fontSize: string;
+		letterSpacing: string;
+		lineHeight: string;
+		paragraphSpacing: number;
+	}>;
+}> {
+	const stylesValue = Array.isArray(input)
+		? input
+		: typeof input === "object" && input !== null && "textStyles" in input
+			? (input as Record<string, unknown>).textStyles
+			: null;
+
+	if (!Array.isArray(stylesValue)) return [];
+
+	const out: Array<{
+		id: string;
+		name: string;
+		tag: string;
+		font: string;
+		boldFont: string | null;
+		italicFont: string | null;
+		boldItalicFont: string | null;
+		color: { id: string; name: string } | string | null;
+		transform: string;
+		alignment: string;
+		decoration: string;
+		decorationColor: { id: string; name: string } | string | null;
+		decorationThickness: string;
+		decorationStyle: string;
+		decorationSkipInk: string;
+		decorationOffset: string;
+		balance: boolean;
+		minWidth: number;
+		fontSize: string;
+		letterSpacing: string;
+		lineHeight: string;
+		paragraphSpacing: number;
+		breakpoints: Array<{
+			minWidth: number;
+			fontSize: string;
+			letterSpacing: string;
+			lineHeight: string;
+			paragraphSpacing: number;
+		}>;
+	}> = [];
+
+	for (const entry of stylesValue) {
+		if (!entry || typeof entry !== "object") continue;
+		const e = entry as Record<string, unknown>;
+
+		const id = typeof e.id === "string" ? e.id : null;
+		const nameRaw =
+			typeof e.name === "string" ? e.name : typeof e.path === "string" ? e.path : null;
+		const name = nameRaw ? stripLeadingSlash(nameRaw) : null;
+		if (!id || !name) continue;
+
+		const tag = typeof e.tag === "string" ? e.tag : null;
+		const font = typeof e.font === "string" ? e.font : null;
+		if (!tag || !font) continue;
+
+		const boldFont =
+			typeof e.boldFont === "string" ? e.boldFont : e.boldFont === null ? null : null;
+		const italicFont =
+			typeof e.italicFont === "string" ? e.italicFont : e.italicFont === null ? null : null;
+		const boldItalicFont =
+			typeof e.boldItalicFont === "string"
+				? e.boldItalicFont
+				: e.boldItalicFont === null
+					? null
+					: null;
+
+		const parseColorRef = (
+			v: unknown
+		): { id: string; name: string; color: string | null } | string | null => {
+			if (v === null) return null;
+			if (typeof v === "string") return v;
+			if (v && typeof v === "object") {
+				const r = v as Record<string, unknown>;
+				const refId = typeof r.id === "string" ? r.id : null;
+				const refNameRaw = typeof r.name === "string" ? r.name : null;
+				const refName = refNameRaw ? stripLeadingSlash(refNameRaw) : null;
+				const refColorRaw = typeof r.color === "string" ? r.color : null;
+				const refColor = refColorRaw ? convertRgbToHex(refColorRaw) : null;
+
+				if (refId && refName) return { id: refId, name: refName, color: refColor };
+			}
+			return null;
+		};
+
+		const color = parseColorRef(e.color);
+		const decorationColor = parseColorRef(e.decorationColor);
+
+		const transform = typeof e.transform === "string" ? e.transform : null;
+		const alignment = typeof e.alignment === "string" ? e.alignment : null;
+		const decoration = typeof e.decoration === "string" ? e.decoration : null;
+		if (!transform || !alignment || !decoration) continue;
+
+		const decorationThickness =
+			typeof e.decorationThickness === "string" ? e.decorationThickness : null;
+		const decorationStyle = typeof e.decorationStyle === "string" ? e.decorationStyle : null;
+		const decorationSkipInk = typeof e.decorationSkipInk === "string" ? e.decorationSkipInk : null;
+		const decorationOffset = typeof e.decorationOffset === "string" ? e.decorationOffset : null;
+		if (!decorationThickness || !decorationStyle || !decorationSkipInk || !decorationOffset)
+			continue;
+
+		const balance = typeof e.balance === "boolean" ? e.balance : null;
+		const minWidth = typeof e.minWidth === "number" ? e.minWidth : null;
+		const fontSize = typeof e.fontSize === "string" ? e.fontSize : null;
+		const letterSpacing = typeof e.letterSpacing === "string" ? e.letterSpacing : null;
+		const lineHeight = typeof e.lineHeight === "string" ? e.lineHeight : null;
+		const paragraphSpacing = typeof e.paragraphSpacing === "number" ? e.paragraphSpacing : null;
+		if (
+			balance === null ||
+			minWidth === null ||
+			fontSize === null ||
+			letterSpacing === null ||
+			lineHeight === null ||
+			paragraphSpacing === null
+		)
+			continue;
+
+		const breakpointsValue = Array.isArray(e.breakpoints) ? e.breakpoints : [];
+		const breakpoints: Array<{
+			minWidth: number;
+			fontSize: string;
+			letterSpacing: string;
+			lineHeight: string;
+			paragraphSpacing: number;
+		}> = [];
+
+		for (const bpEntry of breakpointsValue) {
+			if (!bpEntry || typeof bpEntry !== "object") continue;
+			const bp = bpEntry as Record<string, unknown>;
+			const bpMinWidth = typeof bp.minWidth === "number" ? bp.minWidth : null;
+			const bpFontSize = typeof bp.fontSize === "string" ? bp.fontSize : null;
+			const bpLetterSpacing = typeof bp.letterSpacing === "string" ? bp.letterSpacing : null;
+			const bpLineHeight = typeof bp.lineHeight === "string" ? bp.lineHeight : null;
+			const bpParagraphSpacing =
+				typeof bp.paragraphSpacing === "number" ? bp.paragraphSpacing : null;
+			if (
+				bpMinWidth === null ||
+				!bpFontSize ||
+				!bpLetterSpacing ||
+				!bpLineHeight ||
+				bpParagraphSpacing === null
+			)
+				continue;
+
+			breakpoints.push({
+				minWidth: bpMinWidth,
+				fontSize: bpFontSize,
+				letterSpacing: bpLetterSpacing,
+				lineHeight: bpLineHeight,
+				paragraphSpacing: bpParagraphSpacing,
+			});
+		}
+
+		out.push({
+			id,
+			name,
+			tag,
+			font,
+			boldFont,
+			italicFont,
+			boldItalicFont,
+			color,
+			transform,
+			alignment,
+			decoration,
+			decorationColor,
+			decorationThickness,
+			decorationStyle,
+			decorationSkipInk,
+			decorationOffset,
+			balance,
+			minWidth,
+			fontSize,
+			letterSpacing,
+			lineHeight,
+			paragraphSpacing,
+			breakpoints,
+		});
+	}
+
+	return out;
+}
+
 function convertRgbToHex(value: string): string;
 function convertRgbToHex(value: string | null): string | null;
 function convertRgbToHex(value: string | null) {
@@ -551,19 +1025,24 @@ function toColorStylesCsv(
 	].join("\n");
 }
 
-function serializeColorLike(value: unknown): string | { id: string; name: string } | null {
+function serializeColorLike(
+	value: unknown
+): string | { id: string; name: string; color: string | null } | null {
 	if (typeof value === "string") {
 		return convertRgbToHex(value);
 	}
 
 	// Best-effort serialization for `ColorStyle` token objects.
-	// Export as `{ id, name }` where `name` is the token `path` without a leading `/`.
+	// Export as `{ id, name, color }` where:
+	// - `name` is the token `path` without a leading `/`
+	// - `color` is the token `light` value
 	if (value && typeof value === "object") {
-		const maybe = value as { path?: unknown; id?: unknown };
+		const maybe = value as { path?: unknown; id?: unknown; light?: unknown };
 		const id = maybe.id != null ? String(maybe.id) : null;
 		const name = typeof maybe.path === "string" ? stripLeadingSlash(maybe.path) : null;
+		const color = typeof maybe.light === "string" ? convertRgbToHex(maybe.light) : null;
 
-		if (id && name) return { id, name };
+		if (id && name) return { id, name, color };
 		if (name) return name;
 		if (id) return id;
 	}
@@ -583,11 +1062,11 @@ function toTextStylesCsv(
 		italicFont: string | null;
 		boldItalicFont: string | null;
 
-		color: string | { id: string; name: string } | null;
+		color: string | { id: string; name: string; color: string | null } | null;
 		transform: string;
 		alignment: string;
 		decoration: string;
-		decorationColor: string | { id: string; name: string } | null;
+		decorationColor: string | { id: string; name: string; color: string | null } | null;
 
 		decorationThickness: string;
 		decorationStyle: string;
@@ -610,14 +1089,21 @@ function toTextStylesCsv(
 	}>
 ) {
 	const isColorObject = (
-		value: string | { id: string; name: string } | null
-	): value is { id: string; name: string } => typeof value === "object" && value !== null;
+		value: string | { id: string; name: string; color: string | null } | null
+	): value is { id: string; name: string; color: string | null } =>
+		typeof value === "object" && value !== null;
 
-	const hasColor = textStyles.some((s) => s.color !== null);
+	const hasColor = textStyles.some(
+		(s) => typeof s.color === "string" || (isColorObject(s.color) && s.color.color !== null)
+	);
 	const hasColorId = textStyles.some((s) => isColorObject(s.color) && s.color.id !== null);
 	const hasColorName = textStyles.some((s) => isColorObject(s.color) && s.color.name !== null);
 
-	const hasDecorationColor = textStyles.some((s) => s.decorationColor !== null);
+	const hasDecorationColor = textStyles.some(
+		(s) =>
+			typeof s.decorationColor === "string" ||
+			(isColorObject(s.decorationColor) && s.decorationColor.color !== null)
+	);
 	const hasDecorationColorId = textStyles.some(
 		(s) => isColorObject(s.decorationColor) && s.decorationColor.id !== null
 	);
@@ -696,8 +1182,8 @@ function toTextStylesCsv(
 			if (hasColor) {
 				if (style.color === null) row.push(null);
 				else if (typeof style.color === "string") row.push(style.color);
-				// When `color` is a `{ id, name }` token object, keep this column null.
-				else row.push(null);
+				// When `color` is a token object, export its `light` value into this column.
+				else row.push(style.color.color);
 			}
 
 			if (hasColorId) row.push(isColorObject(style.color) ? style.color.id : null);
@@ -708,8 +1194,8 @@ function toTextStylesCsv(
 			if (hasDecorationColor) {
 				if (style.decorationColor === null) row.push(null);
 				else if (typeof style.decorationColor === "string") row.push(style.decorationColor);
-				// When `decorationColor` is a `{ id, name }` token object, keep this column null.
-				else row.push(null);
+				// When `decorationColor` is a token object, export its `light` value into this column.
+				else row.push(style.decorationColor.color);
 			}
 
 			if (hasDecorationColorId)
