@@ -1,8 +1,6 @@
 {
-  "id": "c2bd45",
-  "name": "Framer Styles Import Export",
-  "modes": [
-    "canvas"
-  ],
-  "icon": "/icon.svg"
+	"id": "c2bd45",
+	"name": "Styles Import & Export",
+	"modes": ["canvas"],
+	"icon": "/icon.svg"
 }
