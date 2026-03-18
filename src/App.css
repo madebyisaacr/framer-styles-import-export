@@ -19,10 +19,10 @@ p {
 	display: flex;
 	width: 100%;
 	gap: 10px;
+}
 
-	button {
-		flex: 1;
-	}
+.button-stack button {
+	flex: 1;
 }
 
 .intro {
@@ -130,8 +130,12 @@ p {
 }
 
 .segmented-control-item.active {
-	color: var(--framer-color-text);
+	color: var(--framer-color-tint);
 	font-weight: 600;
+}
+
+[data-framer-theme="dark"] .segmented-control-item.active {
+	color: var(--framer-color-text);
 }
 
 .segmented-control-bg-container {

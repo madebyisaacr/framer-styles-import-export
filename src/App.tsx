@@ -121,7 +121,9 @@ export function App() {
 			italicFont: style.italicFont ? style.italicFont.selector : null,
 			boldItalicFont: style.boldItalicFont ? style.boldItalicFont.selector : null,
 
-			// `ColorStyle | string` - in practice these are typically strings in RGBA format.
+			// `ColorStyle | string`
+			// - If it's a ColorStyle token, export it as { id, name }.
+			// - If it's a literal string, export as (possibly converted) string.
 			color: serializeColorLike(style.color),
 
 			transform: style.transform,
@@ -409,17 +411,21 @@ function toColorStylesCsv(
 	].join("\n");
 }
 
-function serializeColorLike(value: unknown): string | null {
+function serializeColorLike(value: unknown): string | { id: string; name: string } | null {
 	if (typeof value === "string") {
 		return convertRgbToHex(value);
 	}
 
 	// Best-effort serialization for `ColorStyle` token objects.
-	// When we can't resolve a string color, fall back to token name.
+	// Export as `{ id, name }` where `name` is the token `path` without a leading `/`.
 	if (value && typeof value === "object") {
 		const maybe = value as { path?: unknown; id?: unknown };
-		if (typeof maybe.path === "string") return stripLeadingSlash(maybe.path);
-		if (maybe.id != null) return String(maybe.id);
+		const id = maybe.id != null ? String(maybe.id) : null;
+		const name = typeof maybe.path === "string" ? stripLeadingSlash(maybe.path) : null;
+
+		if (id && name) return { id, name };
+		if (name) return name;
+		if (id) return id;
 	}
 
 	return null;
@@ -437,11 +443,11 @@ function toTextStylesCsv(
 		italicFont: string | null;
 		boldItalicFont: string | null;
 
-		color: string | null;
+		color: string | { id: string; name: string } | null;
 		transform: string;
 		alignment: string;
 		decoration: string;
-		decorationColor: string | null;
+		decorationColor: string | { id: string; name: string } | null;
 
 		decorationThickness: string;
 		decorationStyle: string;
@@ -456,7 +462,23 @@ function toTextStylesCsv(
 		paragraphSpacing: number;
 	}>
 ) {
-	const headers = [
+	const isColorObject = (
+		value: string | { id: string; name: string } | null
+	): value is { id: string; name: string } => typeof value === "object" && value !== null;
+
+	const hasColor = textStyles.some((s) => s.color !== null);
+	const hasColorId = textStyles.some((s) => isColorObject(s.color) && s.color.id !== null);
+	const hasColorName = textStyles.some((s) => isColorObject(s.color) && s.color.name !== null);
+
+	const hasDecorationColor = textStyles.some((s) => s.decorationColor !== null);
+	const hasDecorationColorId = textStyles.some(
+		(s) => isColorObject(s.decorationColor) && s.decorationColor.id !== null
+	);
+	const hasDecorationColorName = textStyles.some(
+		(s) => isColorObject(s.decorationColor) && s.decorationColor.name !== null
+	);
+
+	const headers: string[] = [
 		"id",
 		"name",
 		"tag",
@@ -464,11 +486,19 @@ function toTextStylesCsv(
 		"boldFont",
 		"italicFont",
 		"boldItalicFont",
-		"color",
-		"transform",
-		"alignment",
-		"decoration",
-		"decorationColor",
+	];
+
+	if (hasColor) headers.push("color");
+	if (hasColorId) headers.push("color.id");
+	if (hasColorName) headers.push("color.name");
+
+	headers.push("transform", "alignment", "decoration");
+
+	if (hasDecorationColor) headers.push("decorationColor");
+	if (hasDecorationColorId) headers.push("decorationColor.id");
+	if (hasDecorationColorName) headers.push("decorationColor.name");
+
+	headers.push(
 		"decorationThickness",
 		"decorationStyle",
 		"decorationSkipInk",
@@ -478,8 +508,8 @@ function toTextStylesCsv(
 		"fontSize",
 		"letterSpacing",
 		"lineHeight",
-		"paragraphSpacing",
-	];
+		"paragraphSpacing"
+	);
 
 	const asCsvValue = (v: string | number | boolean | null) => {
 		if (v === null) return "null";
@@ -489,7 +519,7 @@ function toTextStylesCsv(
 	return [
 		headers.join(","),
 		...textStyles.map((style) => {
-			return [
+			const row: Array<string | number | boolean | null> = [
 				style.id,
 				style.name,
 				style.tag,
@@ -497,11 +527,33 @@ function toTextStylesCsv(
 				style.boldFont,
 				style.italicFont,
 				style.boldItalicFont,
-				style.color,
-				style.transform,
-				style.alignment,
-				style.decoration,
-				style.decorationColor,
+			];
+
+			if (hasColor) {
+				if (style.color === null) row.push(null);
+				else if (typeof style.color === "string") row.push(style.color);
+				// When `color` is a `{ id, name }` token object, keep this column null.
+				else row.push(null);
+			}
+
+			if (hasColorId) row.push(isColorObject(style.color) ? style.color.id : null);
+			if (hasColorName) row.push(isColorObject(style.color) ? style.color.name : null);
+
+			row.push(style.transform, style.alignment, style.decoration);
+
+			if (hasDecorationColor) {
+				if (style.decorationColor === null) row.push(null);
+				else if (typeof style.decorationColor === "string") row.push(style.decorationColor);
+				// When `decorationColor` is a `{ id, name }` token object, keep this column null.
+				else row.push(null);
+			}
+
+			if (hasDecorationColorId)
+				row.push(isColorObject(style.decorationColor) ? style.decorationColor.id : null);
+			if (hasDecorationColorName)
+				row.push(isColorObject(style.decorationColor) ? style.decorationColor.name : null);
+
+			row.push(
 				style.decorationThickness,
 				style.decorationStyle,
 				style.decorationSkipInk,
@@ -511,9 +563,11 @@ function toTextStylesCsv(
 				style.fontSize,
 				style.letterSpacing,
 				style.lineHeight,
-				style.paragraphSpacing,
-			]
-				.map((v) => escapeCsvValue(asCsvValue(v)))
+				style.paragraphSpacing
+			);
+
+			return row
+				.map((v) => escapeCsvValue(asCsvValue(v as string | number | boolean | null)))
 				.join(",");
 		}),
 	].join("\n");
