@@ -139,11 +139,20 @@ export function App() {
 			balance: style.balance,
 			minWidth: style.minWidth,
 
-			// Breakpoints intentionally skipped for now.
 			fontSize: style.fontSize,
 			letterSpacing: style.letterSpacing,
 			lineHeight: style.lineHeight,
 			paragraphSpacing: style.paragraphSpacing,
+
+			// Export breakpoints (skip exporting breakpoints styling beyond
+			// the breakpoint-specific typography fields for now).
+			breakpoints: style.breakpoints.map((bp) => ({
+				minWidth: bp.minWidth,
+				fontSize: bp.fontSize,
+				letterSpacing: bp.letterSpacing,
+				lineHeight: bp.lineHeight,
+				paragraphSpacing: bp.paragraphSpacing,
+			})),
 		}));
 
 		const colorCsv = includeColorStyles ? toColorStylesCsv(normalizedColorStyles) : "";
@@ -460,6 +469,13 @@ function toTextStylesCsv(
 		letterSpacing: string;
 		lineHeight: string;
 		paragraphSpacing: number;
+		breakpoints: Array<{
+			minWidth: number;
+			fontSize: string;
+			letterSpacing: string;
+			lineHeight: string;
+			paragraphSpacing: number;
+		}>;
 	}>
 ) {
 	const isColorObject = (
@@ -477,6 +493,11 @@ function toTextStylesCsv(
 	const hasDecorationColorName = textStyles.some(
 		(s) => isColorObject(s.decorationColor) && s.decorationColor.name !== null
 	);
+
+	const hasBreakpoints = textStyles.some((s) => s.breakpoints.length > 0);
+	const maxBreakpoints = hasBreakpoints
+		? Math.max(...textStyles.map((s) => s.breakpoints.length))
+		: 0;
 
 	const headers: string[] = [
 		"id",
@@ -510,6 +531,18 @@ function toTextStylesCsv(
 		"lineHeight",
 		"paragraphSpacing"
 	);
+
+	if (hasBreakpoints) {
+		for (let i = 1; i <= maxBreakpoints; i++) {
+			headers.push(
+				`breakpoint${i}.minWidth`,
+				`breakpoint${i}.fontSize`,
+				`breakpoint${i}.letterSpacing`,
+				`breakpoint${i}.lineHeight`,
+				`breakpoint${i}.paragraphSpacing`
+			);
+		}
+	}
 
 	const asCsvValue = (v: string | number | boolean | null) => {
 		if (v === null) return "null";
@@ -565,6 +598,19 @@ function toTextStylesCsv(
 				style.lineHeight,
 				style.paragraphSpacing
 			);
+
+			if (hasBreakpoints) {
+				for (let i = 0; i < maxBreakpoints; i++) {
+					const bp = style.breakpoints[i];
+					row.push(
+						bp ? bp.minWidth : null,
+						bp ? bp.fontSize : null,
+						bp ? bp.letterSpacing : null,
+						bp ? bp.lineHeight : null,
+						bp ? bp.paragraphSpacing : null
+					);
+				}
+			}
 
 			return row
 				.map((v) => escapeCsvValue(asCsvValue(v as string | number | boolean | null)))
