@@ -2,7 +2,7 @@ import { framer, useIsAllowedTo } from "framer-plugin";
 import { useState, useEffect } from "react";
 import "./App.css";
 import { StylesImportExportIcon } from "./Icons";
-import { isFileLoadingAllowed } from "vite";
+import SegmentedControl from "./SegmentedControl";
 
 void framer.showUI({
 	position: "top right",
@@ -19,6 +19,7 @@ export function App() {
 	);
 
 	const [view, setView] = useState<"home" | "export">("home");
+	const [exportFormat, setExportFormat] = useState<"csv" | "json">("csv");
 
 	const [exportColorStyles, setExportColorStyles] = useState(true);
 	const [exportTextStyles, setExportTextStyles] = useState(true);
@@ -49,22 +50,39 @@ export function App() {
 				</div>
 			</div>
 			<div className="export-form">
-				<label>
-					<input
-						type="checkbox"
-						checked={exportColorStyles}
-						onChange={() => setExportColorStyles(!exportColorStyles)}
+				<div className="property-control">
+					<p>Color Styles</p>
+					<SegmentedControl
+						items={[
+							{ value: "true", label: "Yes" },
+							{ value: "false", label: "No" },
+						]}
+						value={exportColorStyles ? "true" : "false"}
+						onChange={(value) => setExportColorStyles(value === "true")}
 					/>
-					Color Styles
-				</label>
-				<label>
-					<input
-						type="checkbox"
-						checked={exportTextStyles}
-						onChange={() => setExportTextStyles(!exportTextStyles)}
+				</div>
+				<div className="property-control">
+					<p>Text Styles</p>
+					<SegmentedControl
+						items={[
+							{ value: "true", label: "Yes" },
+							{ value: "false", label: "No" },
+						]}
+						value={exportTextStyles ? "true" : "false"}
+						onChange={(value) => setExportTextStyles(value === "true")}
 					/>
-					Text Styles
-				</label>
+				</div>
+				<div className="property-control">
+					<p>Format</p>
+					<SegmentedControl
+						items={[
+							{ value: "csv", label: "CSV" },
+							{ value: "json", label: "JSON" },
+						]}
+						value={exportFormat}
+						onChange={(value) => setExportFormat(value as "csv" | "json")}
+					/>
+				</div>
 			</div>
 			<button type="button" className="framer-button-primary" onClick={onExportClick}>
 				Export

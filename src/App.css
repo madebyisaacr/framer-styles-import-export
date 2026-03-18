@@ -65,14 +65,78 @@ p {
 	display: flex;
 	flex-direction: column;
 	gap: 10px;
-    width: 100%;
+	width: 100%;
 }
 
-.export-form label {
+.property-control {
 	display: flex;
-    flex-direction: row;
+	flex-direction: row;
+	gap: 10px;
+}
+
+.property-control > p {
+	width: 150px;
+	height: 30px;
+	padding-left: 10px;
+	display: flex;
 	align-items: center;
-	gap: 5px;
-    user-select: none;
-    cursor: pointer;
+	color: var(--framer-color-text-secondary);
+}
+
+/* Segmented Control styles */
+.segmented-control {
+	position: relative;
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	justify-content: space-around;
+	background-color: var(--framer-color-bg-tertiary);
+	border-radius: 8px;
+	width: 100%;
+	padding: 2px;
+	height: 30px;
+	grid-column: span 2;
+}
+
+.segmented-control-item {
+	position: relative;
+	background: none !important;
+	border: 0;
+	flex: 1;
+	height: 100%;
+	color: #999999;
+	font-weight: 500;
+	user-select: none;
+	transition: color 200ms ease;
+}
+
+.segmented-control-item:not(.active):hover {
+	color: var(--framer-color-text-secondary);
+}
+
+.segmented-control-item.active {
+	color: var(--framer-color-text);
+	font-weight: 600;
+}
+
+.segmented-control-bg-container {
+	position: absolute;
+	inset: 2px;
+}
+
+.segmented-control-bg {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	border-radius: 6px;
+	background-color: var(--framer-color-bg);
+	box-shadow:
+		0px 0px 0px 1px rgba(0, 0, 0, 0.02),
+		0px 1px 0px 0px rgba(0, 0, 0, 0.05),
+		0px 2px 4px 0px rgba(0, 0, 0, 0.1);
+	transition: left 150ms ease;
+}
+
+[data-framer-theme="dark"] .segmented-control-bg {
+	background-color: #404040;
 }
