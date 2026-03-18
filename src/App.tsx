@@ -3,6 +3,7 @@ import { useState } from "react";
 import "./App.css";
 import { StylesImportExportIcon } from "./Icons";
 import SegmentedControl from "./SegmentedControl";
+import { copyToClipboard } from "./utils";
 
 void framer.showUI({
 	position: "top right",
@@ -32,8 +33,56 @@ export function App() {
 		framer.notify("Import");
 	};
 
+	const buildExportStrings = async (includeColorStyles: boolean) => {
+		const colorStyles = includeColorStyles ? await framer.getColorStyles() : [];
+
+		const normalizedColorStyles = colorStyles.map((style) => ({
+			id: String(style.id),
+			// Export `path` as `name` (without leading `/`), and omit the original `style.name`.
+			name: stripLeadingSlash(style.path),
+			light: convertRgbToHex(style.light),
+			dark: convertRgbToHex(style.dark),
+		}));
+
+		const colorCsv = toColorStylesCsv(normalizedColorStyles);
+
+		const payload = {
+			colorStyles: includeColorStyles ? normalizedColorStyles : [],
+			textStyles: [],
+		};
+
+		const stylesJson = JSON.stringify(payload, null, 2);
+
+		return { colorCsv, stylesJson };
+	};
+
 	const onCopyExportClick = async () => {
-		framer.notify("Export copy");
+		try {
+			if (!exportColorStyles && !exportTextStyles) {
+				framer.notify("Select at least one style type");
+				return;
+			}
+
+			const { colorCsv, stylesJson } = await buildExportStrings(exportColorStyles);
+
+			if (exportFormat === "csv") {
+				const textCsv = "";
+				const parts: string[] = [];
+				if (exportColorStyles) parts.push(colorCsv);
+				if (exportTextStyles) parts.push(textCsv);
+
+				const combined = parts.join("\n\n");
+				const ok = await copyToClipboard(combined);
+				framer.notify(ok ? "Copied" : "Copy failed");
+			} else {
+				const ok = await copyToClipboard(stylesJson);
+				framer.notify(ok ? "Copied" : "Copy failed");
+			}
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			console.error(err);
+			framer.notify(`Copy failed: ${message}`);
+		}
 	};
 
 	const onDownloadExportClick = async () => {
@@ -42,26 +91,12 @@ export function App() {
 				framer.notify("Select at least one style type");
 				return;
 			}
-
-			const colorStyles = exportColorStyles ? await framer.getColorStyles() : [];
-
-			// Normalize to the exact export schema you requested.
-			const normalizedColorStyles = colorStyles.map((style) => ({
-				id: String(style.id),
-				// Export `path` as `name` (without leading `/`), and omit the original `style.name`.
-				name: stripLeadingSlash(style.path),
-				light: convertRgbToHex(style.light),
-				dark: convertRgbToHex(style.dark),
-			}));
+			const { colorCsv, stylesJson } = await buildExportStrings(exportColorStyles);
 
 			if (exportFormat === "csv") {
 				// When exporting both color and text styles as CSV, download them as two files.
 				if (exportColorStyles) {
-					downloadFile(
-						"color-styles.csv",
-						toColorStylesCsv(normalizedColorStyles),
-						"text/csv;charset=utf-8"
-					);
+					downloadFile("color-styles.csv", colorCsv, "text/csv;charset=utf-8");
 				}
 
 				// Text-style export intentionally left blank for now.
@@ -69,19 +104,7 @@ export function App() {
 					downloadFile("text-styles.csv", "", "text/csv;charset=utf-8");
 				}
 			} else {
-				// JSON export format:
-				// { "colorStyles": [...], "textStyles": [] }
-				// For now, `textStyles` is intentionally left empty because the schema is more complex.
-				const payload = {
-					colorStyles: exportColorStyles ? normalizedColorStyles : [],
-					textStyles: [],
-				};
-
-				downloadFile(
-					"styles.json",
-					JSON.stringify(payload, null, 2),
-					"application/json;charset=utf-8"
-				);
+				downloadFile("styles.json", stylesJson, "application/json;charset=utf-8");
 			}
 
 			framer.notify("Export complete");
