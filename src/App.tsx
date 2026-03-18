@@ -1,46 +1,102 @@
-import { framer, CanvasNode } from "framer-plugin";
+import { framer, useIsAllowedTo } from "framer-plugin";
 import { useState, useEffect } from "react";
 import "./App.css";
+import { StylesImportExportIcon } from "./Icons";
+import { isFileLoadingAllowed } from "vite";
 
-framer.showUI({
+void framer.showUI({
 	position: "top right",
-	width: 240,
-	height: 95,
+	width: 260,
+	height: 370,
 });
 
-function useSelection() {
-	const [selection, setSelection] = useState<CanvasNode[]>([]);
-
-	useEffect(() => {
-		return framer.subscribeToSelection(setSelection);
-	}, []);
-
-	return selection;
-}
-
 export function App() {
-	const selection = useSelection();
-	const layer = selection.length === 1 ? "layer" : "layers";
+	const isAllowedToImport = useIsAllowedTo(
+		"createColorStyle",
+		"createTextStyle",
+		"ColorStyle.setAttributes",
+		"TextStyle.setAttributes"
+	);
 
-	const handleAddSvg = async () => {
-		await framer.addSVG({
-			svg: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><path fill="#999" d="M20 0v8h-8L4 0ZM4 8h8l8 8h-8v8l-8-8Z"/></svg>`,
-			name: "Logo.svg",
-		});
+	const [view, setView] = useState<"home" | "export">("home");
+
+	const [exportColorStyles, setExportColorStyles] = useState(true);
+	const [exportTextStyles, setExportTextStyles] = useState(true);
+
+	const onHomeExportClick = () => {
+		setView("export");
 	};
 
-	return (
+	const onImportClick = () => {
+		framer.notify("Import");
+	};
+
+	const onExportClick = () => {
+		framer.notify("Export");
+	};
+
+	return view === "export" ? (
 		<main>
-			<p>
-				Welcome! Check out the{" "}
-				<a href="https://framer.com/developers/plugins/introduction" target="_blank">
-					Docs
-				</a>{" "}
-				to start. You have {selection.length} {layer} selected.
-			</p>
-			<button className="framer-button-primary" onClick={handleAddSvg}>
-				Insert Logo
+			<hr />
+			<p onClick={() => setView("home")}>Back</p>
+			<div className="intro">
+				<div className="asset">
+					<StylesImportExportIcon />
+				</div>
+				<div className="text">
+					<h4>Export Styles</h4>
+					<p>Export color and text styles.</p>
+				</div>
+			</div>
+			<div className="export-form">
+				<label>
+					<input
+						type="checkbox"
+						checked={exportColorStyles}
+						onChange={() => setExportColorStyles(!exportColorStyles)}
+					/>
+					Color Styles
+				</label>
+				<label>
+					<input
+						type="checkbox"
+						checked={exportTextStyles}
+						onChange={() => setExportTextStyles(!exportTextStyles)}
+					/>
+					Text Styles
+				</label>
+			</div>
+			<button type="button" className="framer-button-primary" onClick={onExportClick}>
+				Export
 			</button>
+		</main>
+	) : (
+		<main>
+			<hr />
+			<div className="intro">
+				<div className="asset">
+					<StylesImportExportIcon />
+				</div>
+				<div className="text">
+					<h4>Styles Import & Export</h4>
+					<p>Import and export color and text styles to CSV or JSON files.</p>
+				</div>
+			</div>
+
+			<div className="button-stack">
+				<button
+					type="button"
+					onClick={onImportClick}
+					disabled={!isAllowedToImport}
+					title={isAllowedToImport ? undefined : "Insufficient permissions"}
+				>
+					Import
+				</button>
+
+				<button type="button" className="framer-button-primary" onClick={onHomeExportClick}>
+					Export
+				</button>
+			</div>
 		</main>
 	);
 }
