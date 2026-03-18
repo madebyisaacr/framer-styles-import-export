@@ -1,5 +1,5 @@
 import { framer, useIsAllowedTo } from "framer-plugin";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import "./App.css";
 import { StylesImportExportIcon } from "./Icons";
 import SegmentedControl from "./SegmentedControl";
@@ -71,12 +71,7 @@ function getInitialExportSettings(): ExportSettings {
 }
 
 export function App() {
-	const isAllowedToImport = useIsAllowedTo(
-		"createColorStyle",
-		"createTextStyle",
-		"ColorStyle.setAttributes",
-		"TextStyle.setAttributes"
-	);
+	const isAllowedToImport = useIsAllowedTo("createColorStyle", "ColorStyle.setAttributes");
 
 	const [view, setView] = useState<"home" | "export">("home");
 	const [exportSettings, setExportSettings] = useState<ExportSettings>(() =>
@@ -93,8 +88,97 @@ export function App() {
 		setView("export");
 	};
 
+	const importFileInputRef = useRef<HTMLInputElement | null>(null);
+
 	const onImportClick = () => {
-		framer.notify("Import");
+		importFileInputRef.current?.click();
+	};
+
+	const readFileAsText = (file: File) =>
+		new Promise<string>((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => resolve(String(reader.result ?? ""));
+			reader.onerror = () => reject(reader.error);
+			reader.readAsText(file);
+		});
+
+	const onImportFileSelected = async (event: ChangeEvent<HTMLInputElement>) => {
+		const file = event.target.files?.[0];
+		if (!file) return;
+
+		try {
+			framer.notify("Importing...");
+
+			const raw = await readFileAsText(file);
+			const parsed: unknown = JSON.parse(raw);
+
+			const imported = normalizeImportedColorStyles(parsed);
+			if (imported.length === 0) {
+				framer.notify("No color styles found in JSON");
+				return;
+			}
+
+			const existing = await framer.getColorStyles();
+
+			const byId = new Map<string, (typeof existing)[number]>();
+			const byPath = new Map<string, (typeof existing)[number]>();
+
+			for (const style of existing) {
+				byId.set(String(style.id), style);
+				byPath.set(stripLeadingSlash(style.path), style);
+			}
+
+			let created = 0;
+			let updated = 0;
+			let unchanged = 0;
+
+			for (const importedStyle of imported) {
+				const match = byId.get(importedStyle.id) ?? byPath.get(importedStyle.name);
+
+				if (match) {
+					const updates: { light?: string; dark?: string | null; path?: string } = {};
+
+					if (match.light !== importedStyle.light) {
+						updates.light = importedStyle.light;
+					}
+
+					const matchDark = match.dark ?? null;
+					if (matchDark !== importedStyle.dark) {
+						updates.dark = importedStyle.dark;
+					}
+
+					const matchName = stripLeadingSlash(match.path);
+					if (matchName !== importedStyle.name) {
+						updates.path = importedStyle.name;
+					}
+
+					if (Object.keys(updates).length > 0) {
+						await match.setAttributes(updates);
+						updated++;
+					} else {
+						unchanged++;
+					}
+				} else {
+					await framer.createColorStyle({
+						light: importedStyle.light,
+						dark: importedStyle.dark,
+						path: importedStyle.name,
+					});
+					created++;
+				}
+			}
+
+			framer.notify(
+				`Import complete: ${created} created, ${updated} updated, ${unchanged} unchanged`
+			);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			console.error(err);
+			framer.notify(`Import failed: ${message}`);
+		} finally {
+			// Allow selecting the same file again.
+			event.target.value = "";
+		}
 	};
 
 	const buildExportStrings = async (includeColorStyles: boolean, includeTextStyles: boolean) => {
@@ -348,6 +432,14 @@ export function App() {
 					Export
 				</button>
 			</div>
+
+			<input
+				ref={importFileInputRef}
+				type="file"
+				accept="application/json,.json"
+				style={{ display: "none" }}
+				onChange={onImportFileSelected}
+			/>
 		</main>
 	);
 }
@@ -377,6 +469,45 @@ function escapeCsvValue(value: string) {
 
 function stripLeadingSlash(value: string) {
 	return value.startsWith("/") ? value.slice(1) : value;
+}
+
+function normalizeImportedColorStyles(
+	input: unknown
+): Array<{ id: string; name: string; light: string; dark: string | null }> {
+	const stylesValue = Array.isArray(input)
+		? input
+		: typeof input === "object" && input !== null && "colorStyles" in input
+			? (input as Record<string, unknown>).colorStyles
+			: null;
+
+	if (!Array.isArray(stylesValue)) return [];
+
+	const out: Array<{ id: string; name: string; light: string; dark: string | null }> = [];
+
+	for (const entry of stylesValue) {
+		if (!entry || typeof entry !== "object") continue;
+		const e = entry as Record<string, unknown>;
+
+		if (typeof e.light !== "string") continue;
+
+		const id = typeof e.id === "string" ? e.id : null;
+		const nameRaw =
+			typeof e.name === "string" ? e.name : typeof e.path === "string" ? e.path : null;
+		const name = nameRaw ? stripLeadingSlash(nameRaw) : null;
+
+		if (!id || !name) continue;
+
+		const darkValue = e.dark === null || typeof e.dark === "string" ? e.dark : null;
+
+		out.push({
+			id,
+			name,
+			light: e.light,
+			dark: darkValue,
+		});
+	}
+
+	return out;
 }
 
 function convertRgbToHex(value: string): string;
