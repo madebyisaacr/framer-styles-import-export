@@ -83,6 +83,21 @@ p {
 	color: var(--framer-color-text-secondary);
 }
 
+.back-button {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	gap: 4px;
+	cursor: pointer;
+	color: var(--framer-color-text-tertiary);
+	place-self: flex-start;
+	margin-bottom: -5px;
+}
+
+.back-button:hover {
+	color: var(--framer-color-text-secondary);
+}
+
 /* Segmented Control styles */
 .segmented-control {
 	position: relative;

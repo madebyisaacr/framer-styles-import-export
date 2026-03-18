@@ -1,5 +1,5 @@
 import { framer, useIsAllowedTo } from "framer-plugin";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import "./App.css";
 import { StylesImportExportIcon } from "./Icons";
 import SegmentedControl from "./SegmentedControl";
@@ -32,14 +32,83 @@ export function App() {
 		framer.notify("Import");
 	};
 
-	const onExportClick = () => {
-		framer.notify("Export");
+	const onCopyExportClick = async () => {
+		framer.notify("Export copy");
+	};
+
+	const onDownloadExportClick = async () => {
+		try {
+			if (!exportColorStyles && !exportTextStyles) {
+				framer.notify("Select at least one style type");
+				return;
+			}
+
+			const colorStyles = exportColorStyles ? await framer.getColorStyles() : [];
+
+			// Normalize to the exact export schema you requested.
+			const normalizedColorStyles = colorStyles.map((style) => ({
+				id: String(style.id),
+				// Export `path` as `name` (without leading `/`), and omit the original `style.name`.
+				name: stripLeadingSlash(style.path),
+				light: convertRgbToHex(style.light),
+				dark: convertRgbToHex(style.dark),
+			}));
+
+			if (exportFormat === "csv") {
+				// When exporting both color and text styles as CSV, download them as two files.
+				if (exportColorStyles) {
+					downloadFile(
+						"color-styles.csv",
+						toColorStylesCsv(normalizedColorStyles),
+						"text/csv;charset=utf-8"
+					);
+				}
+
+				// Text-style export intentionally left blank for now.
+				if (exportTextStyles) {
+					downloadFile("text-styles.csv", "", "text/csv;charset=utf-8");
+				}
+			} else {
+				// JSON export format:
+				// { "colorStyles": [...], "textStyles": [] }
+				// For now, `textStyles` is intentionally left empty because the schema is more complex.
+				const payload = {
+					colorStyles: exportColorStyles ? normalizedColorStyles : [],
+					textStyles: [],
+				};
+
+				downloadFile(
+					"styles.json",
+					JSON.stringify(payload, null, 2),
+					"application/json;charset=utf-8"
+				);
+			}
+
+			framer.notify("Export complete");
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			console.error(err);
+			framer.notify(`Export failed: ${message}`);
+		}
 	};
 
 	return view === "export" ? (
 		<main>
 			<hr />
-			<p onClick={() => setView("home")}>Back</p>
+			<div className="back-button" onClick={() => setView("home")}>
+				<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+					<g transform="translate(1.5 1)">
+						<path
+							d="M 3.5 0 L 0 4 L 3.5 7.5"
+							fill="transparent"
+							strokeWidth="1.5"
+							stroke="currentColor"
+							strokeLinecap="round"
+						></path>
+					</g>
+				</svg>
+				Back
+			</div>
 			<div className="intro">
 				<div className="asset">
 					<StylesImportExportIcon />
@@ -84,9 +153,23 @@ export function App() {
 					/>
 				</div>
 			</div>
-			<button type="button" className="framer-button-primary" onClick={onExportClick}>
-				Export
-			</button>
+			<div className="button-stack">
+				<button
+					type="button"
+					onClick={onCopyExportClick}
+					disabled={!exportColorStyles && !exportTextStyles}
+				>
+					Copy
+				</button>
+				<button
+					type="button"
+					className="framer-button-primary"
+					onClick={onDownloadExportClick}
+					disabled={!exportColorStyles && !exportTextStyles}
+				>
+					Download
+				</button>
+			</div>
 		</main>
 	) : (
 		<main>
@@ -117,4 +200,72 @@ export function App() {
 			</div>
 		</main>
 	);
+}
+
+function downloadFile(filename: string, content: string, mimeType: string) {
+	const blob = new Blob([content], { type: mimeType });
+	const url = URL.createObjectURL(blob);
+
+	const anchor = document.createElement("a");
+	anchor.href = url;
+	anchor.download = filename;
+
+	document.body.appendChild(anchor);
+	anchor.click();
+	anchor.remove();
+
+	URL.revokeObjectURL(url);
+}
+
+function escapeCsvValue(value: string) {
+	// CSV escaping: wrap in quotes if the value contains commas, quotes, or newlines.
+	if (/[",\n]/.test(value)) {
+		return `"${value.replaceAll('"', '""')}"`;
+	}
+	return value;
+}
+
+function stripLeadingSlash(value: string) {
+	return value.startsWith("/") ? value.slice(1) : value;
+}
+
+function convertRgbToHex(value: string): string;
+function convertRgbToHex(value: string | null): string | null;
+function convertRgbToHex(value: string | null) {
+	if (value === null) return null;
+	// Only convert `rgb(r, g, b)` (not `rgba(...)`)
+	if (!/^rgb\(/i.test(value) || /^rgba\(/i.test(value)) return value;
+
+	const match = value.match(/^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/i);
+	if (!match) return value;
+
+	const r = clampToByte(Number(match[1]));
+	const g = clampToByte(Number(match[2]));
+	const b = clampToByte(Number(match[3]));
+
+	const toHex = (n: number) => n.toString(16).padStart(2, "0");
+	return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function clampToByte(n: number) {
+	return Math.min(255, Math.max(0, n));
+}
+
+function toColorStylesCsv(
+	colorStyles: Array<{
+		id: string;
+		name: string;
+		light: string;
+		dark: string | null;
+	}>
+) {
+	const headers = ["id", "name", "light", "dark"];
+
+	return [
+		headers.join(","),
+		...colorStyles.map((style) => {
+			const dark = style.dark === null ? "null" : style.dark;
+			return [style.id, style.name, style.light, dark].map(escapeCsvValue).join(",");
+		}),
+	].join("\n");
 }
