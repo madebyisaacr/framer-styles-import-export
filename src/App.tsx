@@ -1,5 +1,5 @@
 import { framer, useIsAllowedTo } from "framer-plugin";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import "./App.css";
 import { StylesImportExportIcon } from "./Icons";
 import SegmentedControl from "./SegmentedControl";
@@ -11,6 +11,45 @@ void framer.showUI({
 	height: 370,
 });
 
+type ExportSettings = {
+	exportFormat: "csv" | "json";
+	exportColorStyles: boolean;
+	exportTextStyles: boolean;
+};
+
+const EXPORT_SETTINGS_STORAGE_KEY = "framer-styles-import-export.export-settings";
+
+function readExportSettings(): Partial<ExportSettings> {
+	try {
+		if (typeof window === "undefined" || !("localStorage" in window)) return {};
+		const raw = window.localStorage.getItem(EXPORT_SETTINGS_STORAGE_KEY);
+		if (!raw) return {};
+
+		const parsed: unknown = JSON.parse(raw);
+		if (!parsed || typeof parsed !== "object") return {};
+
+		const maybe = parsed as Partial<ExportSettings>;
+		return {
+			exportFormat: maybe.exportFormat === "csv" || maybe.exportFormat === "json" ? maybe.exportFormat : undefined,
+			exportColorStyles:
+				typeof maybe.exportColorStyles === "boolean" ? maybe.exportColorStyles : undefined,
+			exportTextStyles: typeof maybe.exportTextStyles === "boolean" ? maybe.exportTextStyles : undefined,
+		};
+	} catch {
+		// If parsing fails for any reason, fall back to defaults.
+		return {};
+	}
+}
+
+function writeExportSettings(settings: ExportSettings) {
+	try {
+		if (typeof window === "undefined" || !("localStorage" in window)) return;
+		window.localStorage.setItem(EXPORT_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+	} catch {
+		// Best-effort persistence; ignore write failures (e.g. private mode).
+	}
+}
+
 export function App() {
 	const isAllowedToImport = useIsAllowedTo(
 		"createColorStyle",
@@ -20,10 +59,25 @@ export function App() {
 	);
 
 	const [view, setView] = useState<"home" | "export">("home");
-	const [exportFormat, setExportFormat] = useState<"csv" | "json">("csv");
+	const [exportFormat, setExportFormat] = useState<"csv" | "json">(() => {
+		return readExportSettings().exportFormat ?? "csv";
+	});
 
-	const [exportColorStyles, setExportColorStyles] = useState(true);
-	const [exportTextStyles, setExportTextStyles] = useState(true);
+	const [exportColorStyles, setExportColorStyles] = useState(() => {
+		return readExportSettings().exportColorStyles ?? true;
+	});
+	const [exportTextStyles, setExportTextStyles] = useState(() => {
+		return readExportSettings().exportTextStyles ?? true;
+	});
+
+	// Keep export settings consistent across reloads.
+	useEffect(() => {
+		writeExportSettings({
+			exportFormat,
+			exportColorStyles,
+			exportTextStyles,
+		});
+	}, [exportFormat, exportColorStyles, exportTextStyles]);
 
 	const onHomeExportClick = () => {
 		setView("export");
@@ -33,8 +87,9 @@ export function App() {
 		framer.notify("Import");
 	};
 
-	const buildExportStrings = async (includeColorStyles: boolean) => {
+	const buildExportStrings = async (includeColorStyles: boolean, includeTextStyles: boolean) => {
 		const colorStyles = includeColorStyles ? await framer.getColorStyles() : [];
+		const textStyles = includeTextStyles ? await framer.getTextStyles() : [];
 
 		const normalizedColorStyles = colorStyles.map((style) => ({
 			id: String(style.id),
@@ -44,16 +99,57 @@ export function App() {
 			dark: convertRgbToHex(style.dark),
 		}));
 
-		const colorCsv = toColorStylesCsv(normalizedColorStyles);
+		const normalizedTextStyles = textStyles.map((style) => ({
+			id: String(style.id),
+			// Export `path` as `name` (without leading `/`), and omit the original `style.name`.
+			name: stripLeadingSlash(style.path),
 
-		const payload = {
-			colorStyles: includeColorStyles ? normalizedColorStyles : [],
-			textStyles: [],
-		};
+			tag: style.tag,
 
-		const stylesJson = JSON.stringify(payload, null, 2);
+			font: style.font.selector,
+			boldFont: style.boldFont ? style.boldFont.selector : null,
+			italicFont: style.italicFont ? style.italicFont.selector : null,
+			boldItalicFont: style.boldItalicFont ? style.boldItalicFont.selector : null,
 
-		return { colorCsv, stylesJson };
+			// `ColorStyle | string` - in practice these are typically strings in RGBA format.
+			color: serializeColorLike(style.color),
+
+			transform: style.transform,
+			alignment: style.alignment,
+			decoration: style.decoration,
+			decorationColor: serializeColorLike(style.decorationColor),
+
+			decorationThickness: style.decorationThickness,
+			decorationStyle: style.decorationStyle,
+			decorationSkipInk: style.decorationSkipInk,
+			decorationOffset: style.decorationOffset,
+
+			balance: style.balance,
+			minWidth: style.minWidth,
+
+			// Breakpoints intentionally skipped for now.
+			fontSize: style.fontSize,
+			letterSpacing: style.letterSpacing,
+			lineHeight: style.lineHeight,
+			paragraphSpacing: style.paragraphSpacing,
+		}));
+
+		const colorCsv = includeColorStyles ? toColorStylesCsv(normalizedColorStyles) : "";
+		const textCsv = includeTextStyles ? toTextStylesCsv(normalizedTextStyles) : "";
+
+		const stylesJsonPayload =
+			includeColorStyles && includeTextStyles
+				? {
+						colorStyles: normalizedColorStyles,
+						textStyles: normalizedTextStyles,
+					}
+				: includeColorStyles
+					? normalizedColorStyles
+					: normalizedTextStyles;
+
+		const stylesJson = JSON.stringify(stylesJsonPayload, null, 2);
+
+		return { colorCsv, textCsv, stylesJson };
 	};
 
 	const onCopyExportClick = async () => {
@@ -63,10 +159,12 @@ export function App() {
 				return;
 			}
 
-			const { colorCsv, stylesJson } = await buildExportStrings(exportColorStyles);
+			const { colorCsv, textCsv, stylesJson } = await buildExportStrings(
+				exportColorStyles,
+				exportTextStyles
+			);
 
 			if (exportFormat === "csv") {
-				const textCsv = "";
 				const parts: string[] = [];
 				if (exportColorStyles) parts.push(colorCsv);
 				if (exportTextStyles) parts.push(textCsv);
@@ -91,7 +189,10 @@ export function App() {
 				framer.notify("Select at least one style type");
 				return;
 			}
-			const { colorCsv, stylesJson } = await buildExportStrings(exportColorStyles);
+			const { colorCsv, textCsv, stylesJson } = await buildExportStrings(
+				exportColorStyles,
+				exportTextStyles
+			);
 
 			if (exportFormat === "csv") {
 				// When exporting both color and text styles as CSV, download them as two files.
@@ -99,9 +200,8 @@ export function App() {
 					downloadFile("color-styles.csv", colorCsv, "text/csv;charset=utf-8");
 				}
 
-				// Text-style export intentionally left blank for now.
 				if (exportTextStyles) {
-					downloadFile("text-styles.csv", "", "text/csv;charset=utf-8");
+					downloadFile("text-styles.csv", textCsv, "text/csv;charset=utf-8");
 				}
 			} else {
 				downloadFile("styles.json", stylesJson, "application/json;charset=utf-8");
@@ -289,6 +389,116 @@ function toColorStylesCsv(
 		...colorStyles.map((style) => {
 			const dark = style.dark === null ? "null" : style.dark;
 			return [style.id, style.name, style.light, dark].map(escapeCsvValue).join(",");
+		}),
+	].join("\n");
+}
+
+function serializeColorLike(value: unknown): string | null {
+	if (typeof value === "string") {
+		return convertRgbToHex(value);
+	}
+
+	// Best-effort serialization for `ColorStyle` token objects.
+	// When we can't resolve a string color, fall back to token name.
+	if (value && typeof value === "object") {
+		const maybe = value as { path?: unknown; id?: unknown };
+		if (typeof maybe.path === "string") return stripLeadingSlash(maybe.path);
+		if (maybe.id != null) return String(maybe.id);
+	}
+
+	return null;
+}
+
+function toTextStylesCsv(
+	textStyles: Array<{
+		id: string;
+		name: string;
+
+		tag: string;
+
+		font: string;
+		boldFont: string | null;
+		italicFont: string | null;
+		boldItalicFont: string | null;
+
+		color: string | null;
+		transform: string;
+		alignment: string;
+		decoration: string;
+		decorationColor: string | null;
+
+		decorationThickness: string;
+		decorationStyle: string;
+		decorationSkipInk: string;
+		decorationOffset: string;
+
+		balance: boolean;
+		minWidth: number;
+		fontSize: string;
+		letterSpacing: string;
+		lineHeight: string;
+		paragraphSpacing: number;
+	}>
+) {
+	const headers = [
+		"id",
+		"name",
+		"tag",
+		"font",
+		"boldFont",
+		"italicFont",
+		"boldItalicFont",
+		"color",
+		"transform",
+		"alignment",
+		"decoration",
+		"decorationColor",
+		"decorationThickness",
+		"decorationStyle",
+		"decorationSkipInk",
+		"decorationOffset",
+		"balance",
+		"minWidth",
+		"fontSize",
+		"letterSpacing",
+		"lineHeight",
+		"paragraphSpacing",
+	];
+
+	const asCsvValue = (v: string | number | boolean | null) => {
+		if (v === null) return "null";
+		return String(v);
+	};
+
+	return [
+		headers.join(","),
+		...textStyles.map((style) => {
+			return [
+				style.id,
+				style.name,
+				style.tag,
+				style.font,
+				style.boldFont,
+				style.italicFont,
+				style.boldItalicFont,
+				style.color,
+				style.transform,
+				style.alignment,
+				style.decoration,
+				style.decorationColor,
+				style.decorationThickness,
+				style.decorationStyle,
+				style.decorationSkipInk,
+				style.decorationOffset,
+				style.balance,
+				style.minWidth,
+				style.fontSize,
+				style.letterSpacing,
+				style.lineHeight,
+				style.paragraphSpacing,
+			]
+				.map((v) => escapeCsvValue(asCsvValue(v)))
+				.join(",");
 		}),
 	].join("\n");
 }
