@@ -30,10 +30,14 @@ function readExportSettings(): Partial<ExportSettings> {
 
 		const maybe = parsed as Partial<ExportSettings>;
 		return {
-			exportFormat: maybe.exportFormat === "csv" || maybe.exportFormat === "json" ? maybe.exportFormat : undefined,
+			exportFormat:
+				maybe.exportFormat === "csv" || maybe.exportFormat === "json"
+					? maybe.exportFormat
+					: undefined,
 			exportColorStyles:
 				typeof maybe.exportColorStyles === "boolean" ? maybe.exportColorStyles : undefined,
-			exportTextStyles: typeof maybe.exportTextStyles === "boolean" ? maybe.exportTextStyles : undefined,
+			exportTextStyles:
+				typeof maybe.exportTextStyles === "boolean" ? maybe.exportTextStyles : undefined,
 		};
 	} catch {
 		// If parsing fails for any reason, fall back to defaults.
@@ -50,6 +54,22 @@ function writeExportSettings(settings: ExportSettings) {
 	}
 }
 
+function getInitialExportSettings(): ExportSettings {
+	const partial = readExportSettings();
+
+	const exportFormat: ExportSettings["exportFormat"] = partial.exportFormat ?? "csv";
+	let exportColorStyles: boolean = partial.exportColorStyles ?? true;
+	let exportTextStyles: boolean = partial.exportTextStyles ?? true;
+
+	// Avoid the "both disabled" state after reload: fall back to enabling both.
+	if (!exportColorStyles && !exportTextStyles) {
+		exportColorStyles = true;
+		exportTextStyles = true;
+	}
+
+	return { exportFormat, exportColorStyles, exportTextStyles };
+}
+
 export function App() {
 	const isAllowedToImport = useIsAllowedTo(
 		"createColorStyle",
@@ -59,25 +79,15 @@ export function App() {
 	);
 
 	const [view, setView] = useState<"home" | "export">("home");
-	const [exportFormat, setExportFormat] = useState<"csv" | "json">(() => {
-		return readExportSettings().exportFormat ?? "csv";
-	});
-
-	const [exportColorStyles, setExportColorStyles] = useState(() => {
-		return readExportSettings().exportColorStyles ?? true;
-	});
-	const [exportTextStyles, setExportTextStyles] = useState(() => {
-		return readExportSettings().exportTextStyles ?? true;
-	});
+	const [exportSettings, setExportSettings] = useState<ExportSettings>(() =>
+		getInitialExportSettings()
+	);
+	const { exportFormat, exportColorStyles, exportTextStyles } = exportSettings;
 
 	// Keep export settings consistent across reloads.
 	useEffect(() => {
-		writeExportSettings({
-			exportFormat,
-			exportColorStyles,
-			exportTextStyles,
-		});
-	}, [exportFormat, exportColorStyles, exportTextStyles]);
+		writeExportSettings(exportSettings);
+	}, [exportSettings]);
 
 	const onHomeExportClick = () => {
 		setView("export");
@@ -250,7 +260,9 @@ export function App() {
 							{ value: "false", label: "No" },
 						]}
 						value={exportColorStyles ? "true" : "false"}
-						onChange={(value) => setExportColorStyles(value === "true")}
+						onChange={(value) =>
+							setExportSettings((s) => ({ ...s, exportColorStyles: value === "true" }))
+						}
 					/>
 				</div>
 				<div className="property-control">
@@ -261,7 +273,9 @@ export function App() {
 							{ value: "false", label: "No" },
 						]}
 						value={exportTextStyles ? "true" : "false"}
-						onChange={(value) => setExportTextStyles(value === "true")}
+						onChange={(value) =>
+							setExportSettings((s) => ({ ...s, exportTextStyles: value === "true" }))
+						}
 					/>
 				</div>
 				<div className="property-control">
@@ -272,7 +286,9 @@ export function App() {
 							{ value: "json", label: "JSON" },
 						]}
 						value={exportFormat}
-						onChange={(value) => setExportFormat(value as "csv" | "json")}
+						onChange={(value) =>
+							setExportSettings((s) => ({ ...s, exportFormat: value as "csv" | "json" }))
+						}
 					/>
 				</div>
 			</div>
