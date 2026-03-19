@@ -115,6 +115,11 @@ export function App() {
 			framer.notify("Importing...");
 
 			const raw = await readFileAsText(file);
+			if (file.name.toLowerCase().endsWith(".csv")) {
+				await importFromCsv(raw);
+				return;
+			}
+
 			const parsed: unknown = JSON.parse(raw);
 
 			const importedColorStyles = normalizeImportedColorStyles(parsed);
@@ -691,7 +696,7 @@ export function App() {
 			<input
 				ref={importFileInputRef}
 				type="file"
-				accept="application/json,.json"
+				accept="application/json,.json,text/csv,.csv"
 				style={{ display: "none" }}
 				onChange={onImportFileSelected}
 			/>
@@ -982,6 +987,624 @@ function normalizeImportedTextStyles(input: unknown): Array<{
 	}
 
 	return out;
+}
+
+async function importFromCsv(raw: string) {
+	const parsed = parseCsv(raw);
+	if (parsed.headers.length === 0) {
+		framer.notify("CSV import failed: no header row found");
+		return;
+	}
+
+	const type = detectCsvImportType(parsed.headers);
+	if (type === "both") {
+		framer.notify("CSV import error: file must contain only one type (color or text)");
+		return;
+	}
+	if (type === null) {
+		framer.notify("CSV import error: could not detect CSV type (missing `light` or `tag` header)");
+		return;
+	}
+
+	if (type === "color") {
+		await importColorStylesFromCsv(parsed);
+		return;
+	}
+
+	await importTextStylesFromCsv(parsed);
+}
+
+function parseCsv(raw: string): { headers: string[]; rows: string[][] } {
+	// Simple CSV parser with quoted field support.
+	// - Comma delimiter
+	// - Double-quotes for escaping: "" => "
+	// - Supports \n and \r\n line endings
+	const text = raw.replace(/^\uFEFF/, "");
+
+	const rows: string[][] = [];
+	let currentRow: string[] = [];
+	let currentField = "";
+	let inQuotes = false;
+
+	for (let i = 0; i < text.length; i++) {
+		const char = text[i];
+		const next = i + 1 < text.length ? text[i + 1] : "";
+
+		if (inQuotes) {
+			if (char === '"' && next === '"') {
+				currentField += '"';
+				i++;
+				continue;
+			}
+			if (char === '"') {
+				inQuotes = false;
+				continue;
+			}
+
+			currentField += char;
+			continue;
+		}
+
+		if (char === '"') {
+			inQuotes = true;
+			continue;
+		}
+
+		if (char === ",") {
+			currentRow.push(currentField);
+			currentField = "";
+			continue;
+		}
+
+		if (char === "\n") {
+			currentRow.push(currentField);
+			rows.push(currentRow);
+			currentRow = [];
+			currentField = "";
+			continue;
+		}
+
+		if (char === "\r") {
+			// Ignore CR; Windows newlines are handled by the subsequent \n.
+			continue;
+		}
+
+		currentField += char;
+	}
+
+	// Flush last line
+	if (currentField !== "" || currentRow.length > 0) {
+		currentRow.push(currentField);
+		rows.push(currentRow);
+	}
+
+	const headers = (rows[0] ?? []).map((h) => h.trim());
+	const dataRows = rows.slice(1).filter((r) => r.some((cell) => cell.trim() !== ""));
+
+	return { headers, rows: dataRows };
+}
+
+function detectCsvImportType(headers: string[]): "color" | "text" | "both" | null {
+	const normalized = headers.map((h) => h.trim().toLowerCase());
+	const hasLight = normalized.includes("light");
+	const hasTag = normalized.includes("tag");
+
+	if (hasLight && hasTag) return "both";
+	if (hasLight) return "color";
+	if (hasTag) return "text";
+	return null;
+}
+
+function csvIndexMap(headers: string[]) {
+	const map = new Map<string, number>();
+	for (let i = 0; i < headers.length; i++) {
+		map.set(headers[i].trim().toLowerCase(), i);
+	}
+	return map;
+}
+
+function csvCellToStringOrNull(value: string | undefined): string | null {
+	if (value === undefined) return null;
+	const trimmed = value.trim();
+	if (!trimmed) return null;
+	if (trimmed.toLowerCase() === "null") return null;
+	return trimmed;
+}
+
+function csvCellToNumberOrNull(value: string | undefined): number | null {
+	const s = csvCellToStringOrNull(value);
+	if (s === null) return null;
+	const n = Number(s);
+	return Number.isFinite(n) ? n : null;
+}
+
+function csvCellToBooleanOrNull(value: string | undefined): boolean | null {
+	const s = csvCellToStringOrNull(value);
+	if (s === null) return null;
+	if (s.toLowerCase() === "true") return true;
+	if (s.toLowerCase() === "false") return false;
+	return null;
+}
+
+async function importColorStylesFromCsv(parsed: { headers: string[]; rows: string[][] }) {
+	const headers = parsed.headers;
+	const index = csvIndexMap(headers);
+
+	const idCol = index.has("id") ? index.get("id") : undefined;
+	const nameCol = index.has("name") ? index.get("name") : index.get("path");
+	const lightCol = index.get("light");
+	const darkCol = index.has("dark") ? index.get("dark") : undefined;
+
+	if (lightCol === undefined || nameCol === undefined) {
+		framer.notify("CSV color import error: header must include `light` and `name` (or `path`)");
+		return;
+	}
+
+	const existing = await framer.getColorStyles();
+	const byId = new Map<string, (typeof existing)[number]>();
+	const byPath = new Map<string, (typeof existing)[number]>();
+	for (const style of existing) {
+		byId.set(String(style.id), style);
+		byPath.set(stripLeadingSlash(style.path), style);
+	}
+
+	let created = 0;
+	let updated = 0;
+	let unchanged = 0;
+
+	for (const row of parsed.rows) {
+		const importedId = idCol !== undefined ? csvCellToStringOrNull(row[idCol]) : null;
+		const importedName = csvCellToStringOrNull(row[nameCol]);
+		const importedLight = csvCellToStringOrNull(row[lightCol]);
+		const importedDark = darkCol !== undefined ? csvCellToStringOrNull(row[darkCol]) : undefined;
+
+		if (!importedName || !importedLight) continue;
+
+		const match = (importedId ? byId.get(importedId) : undefined) ?? byPath.get(importedName);
+
+		if (!match) {
+			await framer.createColorStyle({
+				light: importedLight,
+				dark: importedDark ?? undefined,
+				path: importedName,
+			});
+			created++;
+			continue;
+		}
+
+		const updates: { light?: string; dark?: string | null; path?: string } = {};
+
+		const projectLight = match.light;
+		if (projectLight !== importedLight) {
+			// Best-effort normalization for project-side rgb() values.
+			const normalizedProjectLight = convertRgbToHex(projectLight) ?? projectLight;
+			if (normalizedProjectLight !== importedLight) {
+				updates.light = importedLight;
+			}
+		}
+
+		if (darkCol !== undefined) {
+			const matchDark = match.dark ?? null;
+			if (matchDark !== importedDark) {
+				updates.dark = importedDark;
+			}
+		}
+
+		if (nameCol !== undefined) {
+			const matchName = stripLeadingSlash(match.path);
+			if (matchName !== importedName) {
+				updates.path = importedName;
+			}
+		}
+
+		if (Object.keys(updates).length === 0) unchanged++;
+		else {
+			await match.setAttributes(updates);
+			updated++;
+		}
+	}
+
+	framer.notify(
+		`Color import complete: ${created} created, ${updated} updated, ${unchanged} unchanged`
+	);
+}
+
+async function importTextStylesFromCsv(parsed: { headers: string[]; rows: string[][] }) {
+	const headers = parsed.headers;
+	const index = csvIndexMap(headers);
+
+	const idCol = index.get("id");
+	const nameCol = index.get("name") ?? index.get("path");
+	const tagCol = index.get("tag");
+	const fontCol = index.get("font");
+
+	if (nameCol === undefined || tagCol === undefined || fontCol === undefined) {
+		framer.notify("CSV text import error: header must include `name`, `tag`, and `font`");
+		return;
+	}
+
+	// Color token columns (optional)
+	const colorCol = index.get("color");
+	const colorIdCol = index.get("color.id");
+	const colorNameCol = index.get("color.name");
+
+	const decorationColorCol = index.get("decorationcolor");
+	const decorationColorIdCol = index.get("decorationcolor.id");
+	const decorationColorNameCol = index.get("decorationcolor.name");
+
+	// Fonts
+	const boldFontCol = index.get("boldfont");
+	const italicFontCol = index.get("italicfont");
+	const boldItalicFontCol = index.get("bolditalicfont");
+
+	// Style strings (optional)
+	const transformCol = index.get("transform");
+	const alignmentCol = index.get("alignment");
+	const decorationCol = index.get("decoration");
+
+	const decorationThicknessCol = index.get("decorationthickness");
+	const decorationStyleCol = index.get("decorationstyle");
+	const decorationSkipInkCol = index.get("decorationskipink");
+	const decorationOffsetCol = index.get("decorationoffset");
+
+	// Base typography (optional)
+	const balanceCol = index.get("balance");
+	const minWidthCol = index.get("minwidth");
+	const fontSizeCol = index.get("fontsize");
+	const letterSpacingCol = index.get("letterspacing");
+	const lineHeightCol = index.get("lineheight");
+	const paragraphSpacingCol = index.get("paragraphspacing");
+
+	// Breakpoints columns (optional)
+	const breakpointMinWidthRegex = /^breakpoint(\d+)\.minwidth$/;
+	let maxBreakpoints = 0;
+	for (const h of headers) {
+		const m = h.trim().toLowerCase().match(breakpointMinWidthRegex);
+		if (m) maxBreakpoints = Math.max(maxBreakpoints, Number(m[1]));
+	}
+
+	const existingText = await framer.getTextStyles();
+	const byId = new Map<string, (typeof existingText)[number]>();
+	const byPath = new Map<string, (typeof existingText)[number]>();
+	for (const style of existingText) {
+		byId.set(String(style.id), style);
+		byPath.set(stripLeadingSlash(style.path), style);
+	}
+
+	const fonts = await framer.getFonts();
+	const byFontSelector = new Map<string, (typeof fonts)[number]>();
+	for (const f of fonts) byFontSelector.set(f.selector, f);
+
+	const colors = await framer.getColorStyles();
+	const byColorId = new Map<string, (typeof colors)[number]>();
+	const byColorPath = new Map<string, (typeof colors)[number]>();
+	for (const c of colors) {
+		byColorId.set(String(c.id), c);
+		byColorPath.set(stripLeadingSlash(c.path), c);
+	}
+
+	const resolveColor = (
+		colorId: string | null,
+		colorName: string | null,
+		colorValue: string | null
+	) => {
+		const byIdMatch = colorId ? byColorId.get(colorId) : undefined;
+		if (byIdMatch) return byIdMatch;
+
+		const byPathMatch = colorName ? byColorPath.get(colorName) : undefined;
+		if (byPathMatch) return byPathMatch;
+
+		// Fallback: if we have a color value, use it as a literal string.
+		return colorValue ?? undefined;
+	};
+
+	const resolveFont = (selector: string | null) => {
+		if (!selector) return null;
+		return byFontSelector.get(selector) ?? null;
+	};
+
+	let created = 0;
+	let updated = 0;
+	let unchanged = 0;
+
+	for (const row of parsed.rows) {
+		const importedId = idCol !== undefined ? csvCellToStringOrNull(row[idCol]) : null;
+		const importedName = csvCellToStringOrNull(row[nameCol]);
+		const importedTag = csvCellToStringOrNull(row[tagCol]);
+		const importedFontSelector = csvCellToStringOrNull(row[fontCol]);
+
+		if (!importedName || !importedTag || !importedFontSelector) continue;
+
+		const match = (importedId ? byId.get(importedId) : undefined) ?? byPath.get(importedName);
+
+		const importedBoldFontSelector =
+			boldFontCol !== undefined ? csvCellToStringOrNull(row[boldFontCol]) : undefined;
+		const importedItalicFontSelector =
+			italicFontCol !== undefined ? csvCellToStringOrNull(row[italicFontCol]) : undefined;
+		const importedBoldItalicFontSelector =
+			boldItalicFontCol !== undefined ? csvCellToStringOrNull(row[boldItalicFontCol]) : undefined;
+
+		const desired: Record<string, unknown> = {
+			path: importedName,
+			tag: importedTag,
+		};
+
+		const fontObj = resolveFont(importedFontSelector);
+		if (!fontObj) continue;
+		desired.font = fontObj;
+
+		// Optional font variants; null means explicitly clear.
+		if (boldFontCol !== undefined) {
+			desired.boldFont = resolveFont(importedBoldFontSelector ?? null);
+		}
+		if (italicFontCol !== undefined) {
+			desired.italicFont = resolveFont(importedItalicFontSelector ?? null);
+		}
+		if (boldItalicFontCol !== undefined) {
+			desired.boldItalicFont = resolveFont(importedBoldItalicFontSelector ?? null);
+		}
+
+		if (transformCol !== undefined) {
+			const v = csvCellToStringOrNull(row[transformCol]);
+			if (v !== null) desired.transform = v;
+		}
+		if (alignmentCol !== undefined) {
+			const v = csvCellToStringOrNull(row[alignmentCol]);
+			if (v !== null) desired.alignment = v;
+		}
+		if (decorationCol !== undefined) {
+			const v = csvCellToStringOrNull(row[decorationCol]);
+			if (v !== null) desired.decoration = v;
+		}
+
+		// Decoration color token (optional)
+		let decorationColorResolved: unknown = undefined;
+		if (
+			decorationColorCol !== undefined ||
+			decorationColorIdCol !== undefined ||
+			decorationColorNameCol !== undefined
+		) {
+			const colorId =
+				decorationColorIdCol !== undefined
+					? csvCellToStringOrNull(row[decorationColorIdCol])
+					: null;
+			const colorName =
+				decorationColorNameCol !== undefined
+					? csvCellToStringOrNull(row[decorationColorNameCol])
+					: null;
+			const colorValue =
+				decorationColorCol !== undefined ? csvCellToStringOrNull(row[decorationColorCol]) : null;
+			const resolved = resolveColor(
+				colorId,
+				colorName ? stripLeadingSlash(colorName) : null,
+				colorValue
+			);
+			if (resolved !== undefined) decorationColorResolved = resolved;
+		}
+		if (decorationColorResolved !== undefined) desired.decorationColor = decorationColorResolved;
+
+		if (decorationThicknessCol !== undefined) {
+			const v = csvCellToStringOrNull(row[decorationThicknessCol]);
+			if (v !== null) desired.decorationThickness = v;
+		}
+		if (decorationStyleCol !== undefined) {
+			const v = csvCellToStringOrNull(row[decorationStyleCol]);
+			if (v !== null) desired.decorationStyle = v;
+		}
+		if (decorationSkipInkCol !== undefined) {
+			const v = csvCellToStringOrNull(row[decorationSkipInkCol]);
+			if (v !== null) desired.decorationSkipInk = v;
+		}
+		if (decorationOffsetCol !== undefined) {
+			const v = csvCellToStringOrNull(row[decorationOffsetCol]);
+			if (v !== null) desired.decorationOffset = v;
+		}
+
+		// Main color token (optional)
+		let colorResolved: unknown = undefined;
+		if (colorCol !== undefined || colorIdCol !== undefined || colorNameCol !== undefined) {
+			const cId = colorIdCol !== undefined ? csvCellToStringOrNull(row[colorIdCol]) : null;
+			const cName = colorNameCol !== undefined ? csvCellToStringOrNull(row[colorNameCol]) : null;
+			const cValue = colorCol !== undefined ? csvCellToStringOrNull(row[colorCol]) : null;
+			const resolved = resolveColor(cId, cName ? stripLeadingSlash(cName) : null, cValue);
+			if (resolved !== undefined) colorResolved = resolved;
+		}
+		if (colorResolved !== undefined) desired.color = colorResolved;
+
+		if (balanceCol !== undefined) {
+			const v = csvCellToBooleanOrNull(row[balanceCol]);
+			if (v !== null) desired.balance = v;
+		}
+		if (minWidthCol !== undefined) {
+			const v = csvCellToNumberOrNull(row[minWidthCol]);
+			if (v !== null) desired.minWidth = v;
+		}
+		if (fontSizeCol !== undefined) {
+			const v = csvCellToStringOrNull(row[fontSizeCol]);
+			if (v !== null) desired.fontSize = v;
+		}
+		if (letterSpacingCol !== undefined) {
+			const v = csvCellToStringOrNull(row[letterSpacingCol]);
+			if (v !== null) desired.letterSpacing = v;
+		}
+		if (lineHeightCol !== undefined) {
+			const v = csvCellToStringOrNull(row[lineHeightCol]);
+			if (v !== null) desired.lineHeight = v;
+		}
+		if (paragraphSpacingCol !== undefined) {
+			const v = csvCellToNumberOrNull(row[paragraphSpacingCol]);
+			if (v !== null) desired.paragraphSpacing = v;
+		}
+
+		if (maxBreakpoints > 0) {
+			const breakpoints: Array<{
+				minWidth: number;
+				fontSize?: string;
+				letterSpacing?: string;
+				lineHeight?: string;
+				paragraphSpacing?: number;
+			}> = [];
+
+			for (let i = 1; i <= maxBreakpoints; i++) {
+				const minCol = index.get(`breakpoint${i}.minwidth`);
+				if (minCol === undefined) continue;
+				const minWidth = csvCellToNumberOrNull(row[minCol]);
+				if (minWidth === null) continue;
+
+				const bp: {
+					minWidth: number;
+					fontSize?: string;
+					letterSpacing?: string;
+					lineHeight?: string;
+					paragraphSpacing?: number;
+				} = { minWidth };
+
+				const fontSizeIdx = index.get(`breakpoint${i}.fontsize`);
+				const letterSpacingIdx = index.get(`breakpoint${i}.letterspacing`);
+				const lineHeightIdx = index.get(`breakpoint${i}.lineheight`);
+				const paragraphSpacingIdx = index.get(`breakpoint${i}.paragraphspacing`);
+
+				if (fontSizeIdx !== undefined) {
+					const v = csvCellToStringOrNull(row[fontSizeIdx]);
+					if (v !== null) bp.fontSize = v;
+				}
+				if (letterSpacingIdx !== undefined) {
+					const v = csvCellToStringOrNull(row[letterSpacingIdx]);
+					if (v !== null) bp.letterSpacing = v;
+				}
+				if (lineHeightIdx !== undefined) {
+					const v = csvCellToStringOrNull(row[lineHeightIdx]);
+					if (v !== null) bp.lineHeight = v;
+				}
+				if (paragraphSpacingIdx !== undefined) {
+					const v = csvCellToNumberOrNull(row[paragraphSpacingIdx]);
+					if (v !== null) bp.paragraphSpacing = v;
+				}
+
+				breakpoints.push(bp);
+			}
+
+			if (breakpoints.length > 0) desired.breakpoints = breakpoints;
+		}
+
+		if (!match) {
+			// Minimal creation requirements: path, tag, font.
+			if (!desired.path || !desired.tag || !desired.font) continue;
+			await framer.createTextStyle(desired as Parameters<typeof framer.createTextStyle>[0]);
+			created++;
+			continue;
+		}
+
+		const updates: Record<string, unknown> = {};
+
+		const current: Record<string, unknown> = {
+			path: stripLeadingSlash(match.path),
+			tag: match.tag,
+			font: match.font.selector,
+			boldFont: match.boldFont?.selector ?? null,
+			italicFont: match.italicFont?.selector ?? null,
+			boldItalicFont: match.boldItalicFont?.selector ?? null,
+			color:
+				typeof match.color === "string"
+					? match.color
+					: (convertRgbToHex(match.color.light) ?? match.color.light),
+			decoration: match.decoration,
+			decorationColor:
+				typeof match.decorationColor === "string"
+					? match.decorationColor
+					: (convertRgbToHex(match.decorationColor.light) ?? match.decorationColor.light),
+			transform: match.transform,
+			alignment: match.alignment,
+			decorationThickness: match.decorationThickness,
+			decorationStyle: match.decorationStyle,
+			decorationSkipInk: match.decorationSkipInk,
+			decorationOffset: match.decorationOffset,
+			balance: match.balance,
+			minWidth: match.minWidth,
+			fontSize: match.fontSize,
+			letterSpacing: match.letterSpacing,
+			lineHeight: match.lineHeight,
+			paragraphSpacing: match.paragraphSpacing,
+			breakpoints: match.breakpoints.map((bp) => ({
+				minWidth: bp.minWidth,
+				fontSize: bp.fontSize,
+				letterSpacing: bp.letterSpacing,
+				lineHeight: bp.lineHeight,
+				paragraphSpacing: bp.paragraphSpacing,
+			})),
+		};
+
+		// Compare only keys we actually set in `desired`.
+		for (const [k, v] of Object.entries(desired)) {
+			if (k === "font") continue;
+			if (k === "boldFont" || k === "italicFont" || k === "boldItalicFont") {
+				const selector =
+					typeof v === "object" &&
+					v !== null &&
+					"selector" in v &&
+					typeof (v as { selector?: unknown }).selector === "string"
+						? (v as { selector: string }).selector
+						: null;
+				if (current[k] !== selector) updates[k] = v;
+				continue;
+			}
+
+			if (k === "color") {
+				const desiredLiteral =
+					typeof v === "string"
+						? (convertRgbToHex(v) ?? v)
+						: typeof v === "object" &&
+							  v !== null &&
+							  "light" in v &&
+							  typeof (v as { light?: unknown }).light === "string"
+							? (convertRgbToHex((v as { light: string }).light) ?? (v as { light: string }).light)
+							: null;
+				if (current.color !== desiredLiteral) updates.color = v;
+				continue;
+			}
+
+			if (k === "decorationColor") {
+				const desiredLiteral =
+					typeof v === "string"
+						? (convertRgbToHex(v) ?? v)
+						: typeof v === "object" &&
+							  v !== null &&
+							  "light" in v &&
+							  typeof (v as { light?: unknown }).light === "string"
+							? (convertRgbToHex((v as { light: string }).light) ?? (v as { light: string }).light)
+							: null;
+				if (current.decorationColor !== desiredLiteral) updates.decorationColor = v;
+				continue;
+			}
+
+			if (k === "font") {
+				continue;
+			}
+
+			if (k === "path") {
+				if (current.path !== v) updates.path = v;
+				continue;
+			}
+
+			if (k === "breakpoints") {
+				if (JSON.stringify(current.breakpoints) !== JSON.stringify(v)) updates.breakpoints = v;
+				continue;
+			}
+
+			// For everything else, compare raw values.
+			if (current[k] !== v) updates[k] = v;
+		}
+
+		if (Object.keys(updates).length === 0) unchanged++;
+		else {
+			await match.setAttributes(updates as unknown as Parameters<typeof match.setAttributes>[0]);
+			updated++;
+		}
+	}
+
+	framer.notify(
+		`Text import complete: ${created} created, ${updated} updated, ${unchanged} unchanged`
+	);
 }
 
 function convertRgbToHex(value: string): string;
